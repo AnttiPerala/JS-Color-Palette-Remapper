@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Palette Remapper (Pixel Art)</title>
+  <style>
+    :root { --bg:#0f1221; --panel:#171a2f; --ink:#e7e9ff; --muted:#a8afd1; --acc:#6ea8fe; }
+    html,body{height:100%;}
+    body{margin:0;font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(180deg,#0e1020,#0a0c18);color:var(--ink);}    
+    header{padding:18px 20px;background:#0b0e1d;border-bottom:1px solid #24284c;position:sticky;top:0;z-index:10}
+    header h1{margin:0;font-size:16px;letter-spacing:.02em}
+    .wrap{max-width:1100px;margin:20px auto;padding:0 16px}
+    .grid{display:grid;gap:16px;grid-template-columns:1fr;}
+    @media (min-width:980px){ .grid{grid-template-columns:360px 1fr;} }
+    .card{background:var(--panel);border:1px solid #24284c;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+    .card h2{margin:0;padding:14px 16px;border-bottom:1px solid #24284c;font-size:14px;color:#cfd5ff}
+    .card .body{padding:14px 16px}
+    label{display:block;margin:10px 0 6px;color:var(--muted)}
+    input[type=file],select,button{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #2a2f59;background:#0e1130;color:var(--ink)}
+    input[type=file]::-webkit-file-upload-button{border:0;border-right:1px solid #2a2f59;padding:10px;background:#131642;color:#cfd5ff}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .row > *{flex:1}
+    .opts{display:grid;gap:8px;grid-template-columns:1fr 1fr}
+    .muted{color:var(--muted)}
+    .badge{display:inline-block;padding:2px 8px;border:1px solid #2a2f59;border-radius:999px;margin-left:6px;font-size:12px;color:#cfd5ff}
+    canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#0a0c18;border:1px solid #2a2f59;border-radius:10px;max-width:100%}
+    .actions{display:flex;gap:10px;margin-top:10px}
+    .actions button{flex:1}
+    .pill{background:linear-gradient(180deg,#1c245c,#111743);}
+    .pill:hover{filter:brightness(1.1)}
+    .hint{font-size:12px;color:#9aa3d9;margin-top:8px}
+    .palettePreview{display:flex;gap:6px;flex-wrap:wrap;padding:6px;border:1px dashed #2a2f59;border-radius:10px;background:#0e1130}
+    .sw{width:18px;height:18px;border-radius:4px;border:1px solid #0006;box-shadow:inset 0 0 0 1px #0006}
+    footer{opacity:.8;text-align:center;padding:20px}
+  </style>
+</head>
+<body>
+  <header><h1>🎨 Palette Remapper (Pixel Art → New Palette)</h1></header>
+  <div class="wrap grid">
+
+    <section class="card">
+      <h2>Inputs</h2>
+      <div class="body">
+        <label>Source image (pixel art PNG)
+          <input id="srcFile" type="file" accept="image/png,image/webp,image/jpeg" />
+        </label>
+        <label>Palette image (PNG/JPG) — colors are collected from all opaque pixels
+          <input id="palFile" type="file" accept="image/png,image/webp,image/jpeg" />
+        </label>
+        <div class="opts">
+          <div>
+            <label>Distance metric</label>
+            <select id="metric">
+              <option value="rgb">RGB (fast)</option>
+              <option value="oklab">OKLab (better matching)</option>
+            </select>
+          </div>
+          <div>
+            <label>Options</label>
+            <div class="row">
+              <label class="muted" style="display:flex;align-items:center;gap:8px">
+                <input id="useDither" type="checkbox" /> Floyd–Steinberg dithering
+              </label>
+              <label class="muted" style="display:flex;align-items:center;gap:8px">
+                <input id="keepAlpha" type="checkbox" checked /> Keep alpha
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="btnApply" class="pill">Apply palette</button>
+          <button id="btnDownload" class="pill" disabled>Download PNG</button>
+        </div>
+        <p class="hint">Tip: Your palette image can be a horizontal strip or a swatch grid. Duplicate colors are ignored. Transparent pixels are skipped.</p>
+        <div id="palInfo" class="hint">Palette: <span id="palCount">0</span> colors</div>
+        <div id="palPreview" class="palettePreview" aria-label="Palette preview"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Preview</h2>
+      <div class="body">
+        <div class="row">
+          <div style="flex:1">
+            <div class="muted">Source</div>
+            <canvas id="srcCanvas" width="0" height="0"></canvas>
+          </div>
+          <div style="flex:1">
+            <div class="muted">Result</div>
+            <canvas id="outCanvas" width="0" height="0"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+  <footer class="muted">Open-source, client-side only. Drop images above, then “Apply palette”.</footer>
+
+<script>
+// ---------- Utilities ----------
+function loadImageFromFile(file){
+  return new Promise((resolve,reject)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = ()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = e=>{ URL.revokeObjectURL(url); reject(e); };
+    img.src = url;
+  });
+}
+function drawImageToCanvas(img, canvas){
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(img,0,0);
+}
+function getImageData(canvas){
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  return ctx.getImageData(0,0,canvas.width,canvas.height);
+}
+function putImageData(canvas, imageData){
+  const ctx = canvas.getContext('2d');
+  ctx.putImageData(imageData,0,0);
+}
+function clamp(v,min,max){ return v<min?min:(v>max?max:v); }
+function toKey(r,g,b,a){ return ((r&255)<<24)|((g&255)<<16)|((b&255)<<8)|(a&255); }
+function fromKey(k){ return [(k>>>24)&255,(k>>>16)&255,(k>>>8)&255,k&255]; }
+
+// sRGB -> OKLab conversion (approx from Björn Ottosson)
+function srgbToLinear(u){ u/=255; return u <= 0.04045 ? u/12.92 : Math.pow((u+0.055)/1.055, 2.4); }
+function linearToSrgb(u){ return Math.round( (u<=0.0031308 ? 12.92*u : 1.055*Math.pow(u,1/2.4)-0.055) * 255 ); }
+function rgbToOKLab(r,g,b){
+  const lr=srgbToLinear(r), lg=srgbToLinear(g), lb=srgbToLinear(b);
+  const l = 0.4122214708*lr + 0.5363325363*lg + 0.0514459929*lb;
+  const m = 0.2119034982*lr + 0.6806995451*lg + 0.1073969566*lb;
+  const s = 0.0883024619*lr + 0.2817188376*lg + 0.6299787005*lb;
+  const l_ = Math.cbrt(l), m_ = Math.cbrt(m), s_ = Math.cbrt(s);
+  return [ 0.2104542553*l_ + 0.7936177850*m_ - 0.0040720468*s_,
+           1.9779984951*l_ - 2.4285922050*m_ + 0.4505937099*s_,
+           0.0259040371*l_ + 0.7827717662*m_ - 0.8086757660*s_ ];
+}
+
+// ---------- Palette extraction ----------
+async function extractPaletteFromImageFile(file){
+  const img = await loadImageFromFile(file);
+  const cvs = document.createElement('canvas');
+  drawImageToCanvas(img, cvs);
+  const { data, width, height } = getImageData(cvs);
+  const seen = new Set();
+  const colors = [];
+  for(let i=0;i<data.length;i+=4){
+    const a = data[i+3];
+    if(a<8) continue; // ignore near-transparent
+    const r=data[i], g=data[i+1], b=data[i+2];
+    const k = toKey(r,g,b,255);
+    if(!seen.has(k)){
+      seen.add(k);
+      colors.push([r,g,b,255]);
+    }
+  }
+  return colors;
+}
+
+function renderPalettePreview(colors){
+  const cont = document.getElementById('palPreview');
+  cont.innerHTML = '';
+  colors.slice(0,512).forEach(([r,g,b,a])=>{
+    const sw = document.createElement('div');
+    sw.className = 'sw';
+    sw.title = `rgba(${r},${g},${b},${a})`;
+    sw.style.background = `rgb(${r} ${g} ${b})`;
+    cont.appendChild(sw);
+  });
+  document.getElementById('palCount').textContent = colors.length;
+}
+
+// ---------- Nearest color ----------
+function buildPaletteIndex(colors, metric){
+  if(metric==='oklab'){
+    return colors.map(([r,g,b,a])=>({rgba:[r,g,b,a], oklab:rgbToOKLab(r,g,b)}));
+  } else {
+    return colors.map(([r,g,b,a])=>({rgba:[r,g,b,a]}));
+  }
+}
+function sqr(n){return n*n}
+function nearestColorRGB(idx, r,g,b){
+  let best=1e9, pick=[0,0,0,255];
+  for(const c of idx){
+    const dr=r-c.rgba[0], dg=g-c.rgba[1], db=b-c.rgba[2];
+    const d = dr*dr + dg*dg + db*db;
+    if(d<best){ best=d; pick=c.rgba; }
+  }
+  return pick;
+}
+function nearestColorOKLab(idx, r,g,b){
+  const v = rgbToOKLab(r,g,b);
+  let best=1e9, pick=[0,0,0,255];
+  for(const c of idx){
+    const dl=v[0]-c.oklab[0], da=v[1]-c.oklab[1], db=v[2]-c.oklab[2];
+    const d = dl*dl + da*da + db*db;
+    if(d<best){ best=d; pick=c.rgba; }
+  }
+  return pick;
+}
+
+// ---------- Remap (with optional FS dithering) ----------
+function remapImageToPalette(srcImageData, paletteColors, {metric='rgb', dither=false, keepAlpha=true}){
+  const { data, width, height } = srcImageData;
+  const out = new ImageData(width, height);
+  const idx = buildPaletteIndex(paletteColors, metric);
+  const nearest = metric==='oklab' ? nearestColorOKLab : nearestColorRGB;
+
+  if(!dither){
+    for(let i=0;i<data.length;i+=4){
+      const a = data[i+3];
+      if(keepAlpha && a<8){ out.data[i+3]=0; continue; }
+      const r = data[i], g = data[i+1], b = data[i+2];
+      const [R,G,B,A] = nearest(idx,r,g,b);
+      out.data[i] = R; out.data[i+1] = G; out.data[i+2] = B; out.data[i+3] = keepAlpha ? a : A;
+    }
+    return out;
+  }
+
+  // Floyd–Steinberg dithering on RGB channels
+  const errR = new Float32Array(width*height);
+  const errG = new Float32Array(width*height);
+  const errB = new Float32Array(width*height);
+  const index = (x,y)=> y*width + x;
+
+  for(let y=0;y<height;y++){
+    for(let x=0;x<width;x++){
+      const i = 4*index(x,y);
+      const a = data[i+3];
+      if(keepAlpha && a<8){ out.data[i+3]=0; continue; }
+      let r = data[i]   + errR[index(x,y)];
+      let g = data[i+1] + errG[index(x,y)];
+      let b = data[i+2] + errB[index(x,y)];
+      r = clamp(Math.round(r),0,255);
+      g = clamp(Math.round(g),0,255);
+      b = clamp(Math.round(b),0,255);
+
+      const [R,G,B,A] = nearest(idx,r,g,b);
+      out.data[i]=R; out.data[i+1]=G; out.data[i+2]=B; out.data[i+3]= keepAlpha ? a : A;
+
+      const er = r - R, eg = g - G, eb = b - B;
+      // distribute error
+      //   * x+1, y    += 7/16
+      //   * x-1, y+1  += 3/16
+      //   * x,   y+1  += 5/16
+      //   * x+1, y+1  += 1/16
+      if(x+1<width){
+        const p=index(x+1,y); errR[p]+=er*7/16; errG[p]+=eg*7/16; errB[p]+=eb*7/16;
+      }
+      if(y+1<height){
+        if(x>0){ const p=index(x-1,y+1); errR[p]+=er*3/16; errG[p]+=eg*3/16; errB[p]+=eb*3/16; }
+        { const p=index(x,y+1);   errR[p]+=er*5/16; errG[p]+=eg*5/16; errB[p]+=eb*5/16; }
+        if(x+1<width){ const p=index(x+1,y+1); errR[p]+=er*1/16; errG[p]+=eg*1/16; errB[p]+=eb*1/16; }
+      }
+    }
+  }
+  return out;
+}
+
+// ---------- App wiring ----------
+const srcFile = document.getElementById('srcFile');
+const palFile = document.getElementById('palFile');
+const srcCanvas = document.getElementById('srcCanvas');
+const outCanvas = document.getElementById('outCanvas');
+const btnApply = document.getElementById('btnApply');
+const btnDownload = document.getElementById('btnDownload');
+const palInfo = document.getElementById('palInfo');
+const palCount = document.getElementById('palCount');
+
+let srcImgData = null;
+let paletteColors = [];
+
+srcFile.addEventListener('change', async (e)=>{
+  const f = e.target.files?.[0];
+  if(!f) return;
+  const img = await loadImageFromFile(f);
+  drawImageToCanvas(img, srcCanvas);
+  srcImgData = getImageData(srcCanvas);
+});
+
+palFile.addEventListener('change', async (e)=>{
+  const f = e.target.files?.[0];
+  if(!f) return;
+  paletteColors = await extractPaletteFromImageFile(f);
+  if(paletteColors.length===0){
+    document.getElementById('palPreview').innerHTML = '<span class="muted">No colors found (image fully transparent?)</span>';
+  } else {
+    renderPalettePreview(paletteColors);
+  }
+});
+
+btnApply.addEventListener('click', ()=>{
+  if(!srcImgData){ alert('Load a source image first.'); return; }
+  if(!paletteColors || paletteColors.length===0){ alert('Load a palette image first.'); return; }
+  const metric = document.getElementById('metric').value;
+  const dither = document.getElementById('useDither').checked;
+  const keepAlpha = document.getElementById('keepAlpha').checked;
+  const mapped = remapImageToPalette(srcImgData, paletteColors, { metric, dither, keepAlpha });
+  outCanvas.width = srcCanvas.width;
+  outCanvas.height = srcCanvas.height;
+  putImageData(outCanvas, mapped);
+  btnDownload.disabled = false;
+});
+
+btnDownload.addEventListener('click', ()=>{
+  const url = outCanvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url; a.download = 'remapped.png'; a.click();
+});
+</script>
+</body>
+</html>
